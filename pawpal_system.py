@@ -130,17 +130,26 @@ class Task:
 
 @dataclass
 class Pet:
-    """A pet owned by an Owner; holds the list of its care tasks."""
+    """A pet owned (or co-managed) by one or more owners."""
 
     name: str
     species: str
     breed: str
-    age: int                # in years
+    age: int                        # in years
+    shared_with: list = field(default_factory=list)   # list of owner names with co-access
     _tasks: list = field(default_factory=list, init=False, repr=False)
 
     def add_task(self, task: Task) -> None:
         """Append a task to this pet's task list."""
         self._tasks.append(task)
+
+    def remove_task(self, task: Task) -> bool:
+        """Remove a task by identity. Returns True if removed."""
+        for i, t in enumerate(self._tasks):
+            if t is task:
+                self._tasks.pop(i)
+                return True
+        return False
 
     def get_tasks(self) -> list[Task]:
         """Return all tasks assigned to this pet (completed or not)."""
@@ -149,6 +158,19 @@ class Pet:
     def get_incomplete_tasks(self) -> list[Task]:
         """Return only tasks that have not been completed yet."""
         return [t for t in self._tasks if not t.completed]
+
+    def is_shared_with(self, owner_name: str) -> bool:
+        """Return True if this pet is shared with the given owner name."""
+        return owner_name.lower() in [n.lower() for n in self.shared_with]
+
+    def add_co_owner(self, owner_name: str) -> None:
+        """Grant co-access to an additional owner (idempotent)."""
+        if not self.is_shared_with(owner_name):
+            self.shared_with.append(owner_name)
+
+    def remove_co_owner(self, owner_name: str) -> None:
+        """Revoke co-access from an owner."""
+        self.shared_with = [n for n in self.shared_with if n.lower() != owner_name.lower()]
 
     # ── serialisation ─────────────────────────────────────────────────────────
 
@@ -159,6 +181,7 @@ class Pet:
             "species": self.species,
             "breed": self.breed,
             "age": self.age,
+            "shared_with": self.shared_with,
             "tasks": [t.to_dict() for t in self._tasks],
         }
 
@@ -170,6 +193,7 @@ class Pet:
             species=data["species"],
             breed=data["breed"],
             age=data["age"],
+            shared_with=data.get("shared_with", []),
         )
         for task_data in data.get("tasks", []):
             pet.add_task(Task.from_dict(task_data))
@@ -186,7 +210,7 @@ class Owner:
         preferences: Optional[list[str]] = None,
     ) -> None:
         self.name = name
-        self.available_minutes = available_minutes  # total free time today
+        self.available_minutes = available_minutes
         self.preferences: list[str] = preferences or []
         self._pets: list[Pet] = []
 
@@ -205,24 +229,28 @@ class Owner:
                 return pet
         return None
 
+    def remove_pet(self, name: str) -> bool:
+        """Remove a pet by name. Returns True if removed, False if not found."""
+        for i, pet in enumerate(self._pets):
+            if pet.name.lower() == name.lower():
+                self._pets.pop(i)
+                return True
+        return False
+
     # ── serialisation ─────────────────────────────────────────────────────────
 
-    def save_to_json(self, filepath: str) -> None:
-        """Persist the owner, all pets, and all tasks to a JSON file."""
-        data = {
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dictionary."""
+        return {
             "name": self.name,
             "available_minutes": self.available_minutes,
             "preferences": self.preferences,
             "pets": [p.to_dict() for p in self._pets],
         }
-        with open(filepath, "w") as f:
-            json.dump(data, f, indent=2)
 
     @classmethod
-    def load_from_json(cls, filepath: str) -> "Owner":
-        """Restore an Owner (with pets and tasks) from a JSON file."""
-        with open(filepath) as f:
-            data = json.load(f)
+    def from_dict(cls, data: dict) -> "Owner":
+        """Deserialise an Owner (with pets and tasks) from a dictionary."""
         owner = cls(
             name=data["name"],
             available_minutes=data["available_minutes"],
@@ -232,19 +260,39 @@ class Owner:
             owner.add_pet(Pet.from_dict(pet_data))
         return owner
 
+    def save_to_json(self, filepath: str) -> None:
+        """Persist this owner (and all pets/tasks) to a JSON file."""
+        with open(filepath, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load_from_json(cls, filepath: str) -> "Owner":
+        """Restore an Owner from a single-owner JSON file."""
+        with open(filepath) as f:
+            return cls.from_dict(json.load(f))
+
 
 class Scheduler:
     """Generates and explains a daily care plan for an Owner's pets."""
 
-    def __init__(self, owner: Owner) -> None:
+    def __init__(self, owner: Owner, extra_pets: Optional[list[Pet]] = None) -> None:
+        """
+        owner       — the active owner.
+        extra_pets  — shared pets from other owners that this owner co-manages.
+        """
         self.owner = owner
+        self._extra_pets: list[Pet] = extra_pets or []
+
+    def _all_pets(self) -> list[Pet]:
+        """Return the owner's own pets plus any shared pets."""
+        return self.owner.get_pets() + self._extra_pets
 
     # ── data retrieval ────────────────────────────────────────────────────────
 
     def get_todays_tasks(self) -> list[Task]:
-        """Collect all incomplete tasks across every pet owned."""
+        """Collect all incomplete tasks across every pet (own + shared)."""
         tasks: list[Task] = []
-        for pet in self.owner.get_pets():
+        for pet in self._all_pets():
             tasks.extend(pet.get_incomplete_tasks())
         return tasks
 
@@ -270,17 +318,19 @@ class Scheduler:
         return [t for t in source if t.completed == completed]
 
     def filter_by_pet(self, pet_name: str) -> list[Task]:
-        """Return all tasks (completed and pending) belonging to a named pet."""
-        pet = self.owner.get_pet_by_name(pet_name)
-        return pet.get_tasks() if pet else []
+        """Return all tasks belonging to a named pet (own or shared)."""
+        for pet in self._all_pets():
+            if pet.name.lower() == pet_name.lower():
+                return pet.get_tasks()
+        return []
 
     # ── schedule generation ───────────────────────────────────────────────────
 
     def generate_schedule(self) -> list[Task]:
         """
         Build today's plan greedily: consider tasks highest-priority first and
-        include each one until available_minutes is exhausted.  The returned
-        list is sorted chronologically by time_of_day for display.
+        include each one until available_minutes is exhausted. Returns the chosen
+        tasks sorted chronologically by time_of_day.
         """
         candidates = self.sort_by_priority()
         schedule: list[Task] = []
@@ -295,9 +345,13 @@ class Scheduler:
         """
         Return a human-readable narrative explaining which tasks were included,
         how much time is used, and which tasks were skipped and why.
+        Uses object identity (is) to match tasks — safe even if fields are equal.
         """
         all_tasks = self.sort_by_priority()
-        skipped = [t for t in all_tasks if t not in schedule]
+        # FIX: use identity (is) not equality (==) to avoid false matches
+        # between two tasks that happen to have identical field values
+        schedule_ids = {id(t) for t in schedule}
+        skipped = [t for t in all_tasks if id(t) not in schedule_ids]
 
         lines = [
             f"Schedule for {self.owner.name}'s pets",
@@ -329,8 +383,8 @@ class Scheduler:
 
     def complete_task_and_reschedule(self, pet: Pet, task: Task) -> Optional[Task]:
         """
-        Mark a task complete. If it is a recurring task (daily/weekly), add its
-        next occurrence to the pet's list and return it; return None otherwise.
+        Mark a task complete. If it is recurring (daily/weekly), add the next
+        occurrence to the pet's list and return it; return None otherwise.
         """
         task.mark_complete()
         next_task = task.next_occurrence()
@@ -343,7 +397,7 @@ class Scheduler:
     def detect_conflicts(self, tasks: Optional[list[Task]] = None) -> list[str]:
         """
         Return warning strings for every time slot where two or more tasks share
-        the exact same time_of_day.  Checks all incomplete tasks by default.
+        the exact same time_of_day. Checks all incomplete tasks by default.
         """
         source = tasks if tasks is not None else self.get_todays_tasks()
         seen: dict[str, list[Task]] = {}
@@ -363,14 +417,15 @@ class Scheduler:
 
     def detect_overlapping_conflicts(self, tasks: Optional[list[Task]] = None) -> list[str]:
         """
-        Detect tasks whose actual time *windows* overlap (start_time + duration),
-        even when they don't share the exact same start time.
-        More precise than detect_conflicts(), which only catches identical start times.
+        Detect tasks whose actual time windows overlap (start_time + duration).
+        More precise than detect_conflicts() which only catches identical start times.
+        Returns deduplicated warnings.
         """
         source = sorted(
             tasks if tasks is not None else self.get_todays_tasks(),
             key=lambda t: t.time_of_day,
         )
+        seen_pairs: set[frozenset] = set()
         warnings: list[str] = []
         for i, a in enumerate(source):
             a_start = _time_to_minutes(a.time_of_day)
@@ -379,10 +434,13 @@ class Scheduler:
                 b_start = _time_to_minutes(b.time_of_day)
                 b_end = b_start + b.duration_minutes
                 if a_start < b_end and a_end > b_start:
-                    warnings.append(
-                        f"Overlap: '{a.name}' ({a.time_of_day}, {a.duration_minutes} min) "
-                        f"and '{b.name}' ({b.time_of_day}, {b.duration_minutes} min) overlap."
-                    )
+                    pair = frozenset({id(a), id(b)})
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        warnings.append(
+                            f"Overlap: '{a.name}' ({a.time_of_day}, {a.duration_minutes} min) "
+                            f"and '{b.name}' ({b.time_of_day}, {b.duration_minutes} min) overlap."
+                        )
         return warnings
 
     # ── advanced: find next available slot ────────────────────────────────────
@@ -396,19 +454,18 @@ class Scheduler:
         step_minutes: int = 15,
     ) -> str:
         """
-        Find the earliest HH:MM start time (stepping in `step_minutes` increments)
-        where `task` can be placed without overlapping any task already in `schedule`.
-
-        Uses the generated schedule by default; pass a custom list to override.
-        Returns the task's original time_of_day if no free slot is found before day_end.
+        Find the earliest HH:MM start time (stepping in step_minutes increments)
+        where task can be placed without overlapping any task already in schedule.
+        Returns the task's original time_of_day if no free slot is found.
         """
         booked = schedule if schedule is not None else self.generate_schedule()
-        # Build occupied (start, end) intervals in minutes
         intervals = [
-            (_time_to_minutes(t.time_of_day), _time_to_minutes(t.time_of_day) + t.duration_minutes)
+            (
+                _time_to_minutes(t.time_of_day),
+                _time_to_minutes(t.time_of_day) + t.duration_minutes,
+            )
             for t in booked
         ]
-
         start_min = _time_to_minutes(day_start)
         end_min = _time_to_minutes(day_end)
 
@@ -419,4 +476,4 @@ class Scheduler:
             if not any(slot_start < e and slot_end > s for s, e in intervals):
                 return _minutes_to_time(slot_start)
 
-        return task.time_of_day  # fallback: no open slot found
+        return task.time_of_day  # fallback
