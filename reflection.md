@@ -2,15 +2,69 @@
 
 ## 1. System Design
 
+### Core User Actions
+
+Three core actions a user should be able to perform:
+
+1. **Add a pet** — Enter basic info about their pet (name, species, breed, age) so the app knows who it's caring for.
+2. **Add and manage care tasks** — Create tasks (walks, feeding, meds, grooming, enrichment) with a duration and priority level.
+3. **Generate and view today's daily plan** — Ask the scheduler to produce a prioritized daily schedule based on available time, task priorities, and constraints, and read an explanation of why that plan was chosen.
+
 **a. Initial design**
 
-- Briefly describe your initial UML design.
-- What classes did you include, and what responsibilities did you assign to each?
+The system uses four classes:
+
+- **Owner** — Holds the pet owner's name and daily available time (in minutes). Acts as the entry point; owns a list of Pet objects.
+- **Pet** — Stores pet details (name, species, breed, age) and holds the list of Tasks assigned to that pet.
+- **Task** — A dataclass representing a single care task with a name, category, duration, priority (1–5), and completion status.
+- **Scheduler** — Takes an Owner and generates a daily plan. It filters tasks by available time and sorts by priority, then provides a human-readable explanation of the plan.
+
+```mermaid
+classDiagram
+    class Owner {
+        +str name
+        +int available_minutes
+        +list~str~ preferences
+        +add_pet(pet: Pet) None
+        +get_pets() list~Pet~
+    }
+
+    class Pet {
+        +str name
+        +str species
+        +str breed
+        +int age
+        +add_task(task: Task) None
+        +get_tasks() list~Task~
+    }
+
+    class Task {
+        +str name
+        +str category
+        +int duration_minutes
+        +int priority
+        +bool completed
+        +mark_complete() None
+        +mark_incomplete() None
+    }
+
+    class Scheduler {
+        +Owner owner
+        +generate_schedule() list~Task~
+        +explain_plan(schedule: list~Task~) str
+        +get_todays_tasks() list~Task~
+    }
+
+    Owner "1" --> "0..*" Pet : owns
+    Pet "1" --> "0..*" Task : has
+    Scheduler "1" --> "1" Owner : schedules for
+```
 
 **b. Design changes**
 
-- Did your design change during implementation?
-- If yes, describe at least one change and why you made it.
+After reviewing the skeleton, one immediate improvement was making `_tasks` a private field on `Pet` (initialized via `dataclass field`) instead of a public list. This prevents callers from bypassing `add_task()` and mutating the list directly — enforcing a clean interface from the start.
+
+A second consideration raised was whether `Scheduler` should hold tasks directly rather than pulling them from `Owner → Pet` at call time. The current design (pulling at call time via `get_todays_tasks()`) was kept because it keeps the Scheduler stateless, making it easier to re-run scheduling without stale data.
 
 ---
 
