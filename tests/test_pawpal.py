@@ -359,3 +359,109 @@ def test_load_preserves_completion_status(tmp_path):
 
     restored = Owner.load_from_json(filepath)
     assert restored.get_pets()[0].get_tasks()[0].completed is True
+
+
+# ── Bug fixes: identity-based checks ─────────────────────────────────────────
+
+def test_generate_schedule_excludes_completed_tasks():
+    """Completed tasks must not appear in the generated schedule."""
+    owner = make_owner(minutes=100)
+    pet = make_pet()
+    owner.add_pet(pet)
+    done = make_task("Done", duration=20)
+    pending = make_task("Pending", duration=20)
+    done.mark_complete()
+    pet.add_task(done)
+    pet.add_task(pending)
+    schedule = Scheduler(owner).generate_schedule()
+    assert len(schedule) == 1
+    assert schedule[0].name == "Pending"
+
+
+def test_explain_plan_skipped_uses_identity_not_equality():
+    """
+    explain_plan must not wrongly list a scheduled task as skipped
+    when another task with identical fields also exists.
+    """
+    owner = make_owner(minutes=20)
+    pet = make_pet()
+    owner.add_pet(pet)
+    # Two tasks with identical fields — only one will fit
+    t1 = make_task("Walk", duration=20, priority=2)
+    t2 = make_task("Walk", duration=20, priority=2)   # same name/fields, different object
+    pet.add_task(t1)
+    pet.add_task(t2)
+    scheduler = Scheduler(owner)
+    schedule = scheduler.generate_schedule()
+    explanation = scheduler.explain_plan(schedule)
+    # Exactly one task should be scheduled and one skipped
+    assert len(schedule) == 1
+    assert "Skipped" in explanation
+
+
+def test_pet_remove_task_uses_identity():
+    """remove_task should remove only the exact task object, not a twin with same fields."""
+    pet = make_pet()
+    t1 = make_task("Walk")
+    t2 = make_task("Walk")   # same fields, different object
+    pet.add_task(t1)
+    pet.add_task(t2)
+    removed = pet.remove_task(t1)
+    assert removed is True
+    assert len(pet.get_tasks()) == 1
+    assert pet.get_tasks()[0] is t2
+
+
+# ── Shared pet feature ────────────────────────────────────────────────────────
+
+def test_shared_pet_visible_to_co_owner():
+    """A pet shared with another owner should appear in that owner's scheduler."""
+    owner_a = Owner("Alice", 60)
+    owner_b = Owner("Bob", 60)
+    pet = Pet("Buddy", "dog", "Lab", 3, shared_with=["Bob"])
+    pet.add_task(make_task("Morning walk", duration=30))
+    owner_a.add_pet(pet)
+
+    # Bob gets access via extra_pets
+    scheduler = Scheduler(owner_b, extra_pets=[pet])
+    tasks = scheduler.get_todays_tasks()
+    assert len(tasks) == 1
+    assert tasks[0].name == "Morning walk"
+
+
+def test_shared_pet_tasks_included_in_schedule():
+    """Tasks from a shared pet count toward the schedule for the co-owner."""
+    owner_a = Owner("Alice", 60)
+    owner_b = Owner("Bob", 60)
+    shared_pet = Pet("Buddy", "dog", "Lab", 3, shared_with=["Bob"])
+    shared_pet.add_task(make_task("Walk", duration=30, priority=3))
+    owner_a.add_pet(shared_pet)
+
+    scheduler = Scheduler(owner_b, extra_pets=[shared_pet])
+    schedule = scheduler.generate_schedule()
+    assert len(schedule) == 1
+    assert schedule[0].name == "Walk"
+
+
+def test_add_remove_co_owner():
+    """add_co_owner / remove_co_owner should maintain the shared_with list correctly."""
+    pet = Pet("Mochi", "dog", "Shiba", 2)
+    assert not pet.is_shared_with("Alice")
+    pet.add_co_owner("Alice")
+    assert pet.is_shared_with("Alice")
+    assert pet.is_shared_with("alice")   # case-insensitive
+    pet.add_co_owner("Alice")            # idempotent — no duplicate
+    assert len(pet.shared_with) == 1
+    pet.remove_co_owner("Alice")
+    assert not pet.is_shared_with("Alice")
+
+
+def test_shared_with_persists_through_save_load(tmp_path):
+    """shared_with list should survive a JSON save/load cycle."""
+    owner = make_owner()
+    pet = Pet("Mochi", "dog", "Shiba", 2, shared_with=["Bob", "Carol"])
+    owner.add_pet(pet)
+    filepath = str(tmp_path / "shared_test.json")
+    owner.save_to_json(filepath)
+    restored = Owner.load_from_json(filepath)
+    assert restored.get_pets()[0].shared_with == ["Bob", "Carol"]
