@@ -1,0 +1,32 @@
+{
+  "owners": [
+    {
+      "name": "shibi",
+      "available_minutes": 30,
+      "preferences": [
+        "evening walks"
+      ],
+      "pets": [
+        {
+          "name": "vs",
+          "species": "dog",
+          "breed": "vs",
+          "age": 3,
+          "tasks": [
+            {
+              "name": "moring walk",
+              "category": "walk",
+              "duration_minutes": 20,
+              "priority": 2,
+              "time_of_day": "08:00",
+              "frequency": "once",
+              "due_date": "2026-03-29",
+              "completed": false
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "active_index": 0
+}
