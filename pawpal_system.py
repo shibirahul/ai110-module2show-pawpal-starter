@@ -3,6 +3,7 @@ PawPal+ – Logic Layer
 Core classes: Owner, Pet, Task, Scheduler
 """
 
+import json
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
@@ -20,6 +21,21 @@ CATEGORY_EMOJI = {
     "other": "📋",
 }
 
+
+# ── time helpers ──────────────────────────────────────────────────────────────
+
+def _time_to_minutes(time_str: str) -> int:
+    """Convert a HH:MM string to minutes since midnight."""
+    h, m = map(int, time_str.split(":"))
+    return h * 60 + m
+
+
+def _minutes_to_time(minutes: int) -> str:
+    """Convert minutes since midnight back to a HH:MM string."""
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+# ── core classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class Task:
@@ -82,6 +98,35 @@ class Task:
             f"priority={self.priority_label}, {self.time_of_day})"
         )
 
+    # ── serialisation ─────────────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dictionary."""
+        return {
+            "name": self.name,
+            "category": self.category,
+            "duration_minutes": self.duration_minutes,
+            "priority": self.priority,
+            "time_of_day": self.time_of_day,
+            "frequency": self.frequency,
+            "due_date": self.due_date.isoformat(),
+            "completed": self.completed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Task":
+        """Deserialise a Task from a dictionary (e.g. loaded from JSON)."""
+        return cls(
+            name=data["name"],
+            category=data["category"],
+            duration_minutes=data["duration_minutes"],
+            priority=data["priority"],
+            time_of_day=data.get("time_of_day", "08:00"),
+            frequency=data.get("frequency", "once"),
+            due_date=date.fromisoformat(data.get("due_date", date.today().isoformat())),
+            completed=data.get("completed", False),
+        )
+
 
 @dataclass
 class Pet:
@@ -104,6 +149,31 @@ class Pet:
     def get_incomplete_tasks(self) -> list[Task]:
         """Return only tasks that have not been completed yet."""
         return [t for t in self._tasks if not t.completed]
+
+    # ── serialisation ─────────────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dictionary."""
+        return {
+            "name": self.name,
+            "species": self.species,
+            "breed": self.breed,
+            "age": self.age,
+            "tasks": [t.to_dict() for t in self._tasks],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Pet":
+        """Deserialise a Pet (and its tasks) from a dictionary."""
+        pet = cls(
+            name=data["name"],
+            species=data["species"],
+            breed=data["breed"],
+            age=data["age"],
+        )
+        for task_data in data.get("tasks", []):
+            pet.add_task(Task.from_dict(task_data))
+        return pet
 
 
 class Owner:
@@ -134,6 +204,33 @@ class Owner:
             if pet.name.lower() == name.lower():
                 return pet
         return None
+
+    # ── serialisation ─────────────────────────────────────────────────────────
+
+    def save_to_json(self, filepath: str) -> None:
+        """Persist the owner, all pets, and all tasks to a JSON file."""
+        data = {
+            "name": self.name,
+            "available_minutes": self.available_minutes,
+            "preferences": self.preferences,
+            "pets": [p.to_dict() for p in self._pets],
+        }
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=2)
+
+    @classmethod
+    def load_from_json(cls, filepath: str) -> "Owner":
+        """Restore an Owner (with pets and tasks) from a JSON file."""
+        with open(filepath) as f:
+            data = json.load(f)
+        owner = cls(
+            name=data["name"],
+            available_minutes=data["available_minutes"],
+            preferences=data.get("preferences", []),
+        )
+        for pet_data in data.get("pets", []):
+            owner.add_pet(Pet.from_dict(pet_data))
+        return owner
 
 
 class Scheduler:
@@ -241,12 +338,12 @@ class Scheduler:
             pet.add_task(next_task)
         return next_task
 
-    # ── conflict detection ────────────────────────────────────────────────────
+    # ── conflict detection (exact time) ──────────────────────────────────────
 
     def detect_conflicts(self, tasks: Optional[list[Task]] = None) -> list[str]:
         """
-        Return warning strings for every time slot where two or more tasks are
-        scheduled simultaneously.  Checks all incomplete tasks by default.
+        Return warning strings for every time slot where two or more tasks share
+        the exact same time_of_day.  Checks all incomplete tasks by default.
         """
         source = tasks if tasks is not None else self.get_todays_tasks()
         seen: dict[str, list[Task]] = {}
@@ -261,3 +358,65 @@ class Scheduler:
                     f"Conflict at {time_slot}: [{names}] are all scheduled at the same time."
                 )
         return warnings
+
+    # ── advanced: overlapping duration detection ──────────────────────────────
+
+    def detect_overlapping_conflicts(self, tasks: Optional[list[Task]] = None) -> list[str]:
+        """
+        Detect tasks whose actual time *windows* overlap (start_time + duration),
+        even when they don't share the exact same start time.
+        More precise than detect_conflicts(), which only catches identical start times.
+        """
+        source = sorted(
+            tasks if tasks is not None else self.get_todays_tasks(),
+            key=lambda t: t.time_of_day,
+        )
+        warnings: list[str] = []
+        for i, a in enumerate(source):
+            a_start = _time_to_minutes(a.time_of_day)
+            a_end = a_start + a.duration_minutes
+            for b in source[i + 1:]:
+                b_start = _time_to_minutes(b.time_of_day)
+                b_end = b_start + b.duration_minutes
+                if a_start < b_end and a_end > b_start:
+                    warnings.append(
+                        f"Overlap: '{a.name}' ({a.time_of_day}, {a.duration_minutes} min) "
+                        f"and '{b.name}' ({b.time_of_day}, {b.duration_minutes} min) overlap."
+                    )
+        return warnings
+
+    # ── advanced: find next available slot ────────────────────────────────────
+
+    def find_next_available_slot(
+        self,
+        task: Task,
+        schedule: Optional[list[Task]] = None,
+        day_start: str = "06:00",
+        day_end: str = "22:00",
+        step_minutes: int = 15,
+    ) -> str:
+        """
+        Find the earliest HH:MM start time (stepping in `step_minutes` increments)
+        where `task` can be placed without overlapping any task already in `schedule`.
+
+        Uses the generated schedule by default; pass a custom list to override.
+        Returns the task's original time_of_day if no free slot is found before day_end.
+        """
+        booked = schedule if schedule is not None else self.generate_schedule()
+        # Build occupied (start, end) intervals in minutes
+        intervals = [
+            (_time_to_minutes(t.time_of_day), _time_to_minutes(t.time_of_day) + t.duration_minutes)
+            for t in booked
+        ]
+
+        start_min = _time_to_minutes(day_start)
+        end_min = _time_to_minutes(day_end)
+
+        for slot_start in range(start_min, end_min, step_minutes):
+            slot_end = slot_start + task.duration_minutes
+            if slot_end > end_min:
+                break
+            if not any(slot_start < e and slot_end > s for s, e in intervals):
+                return _minutes_to_time(slot_start)
+
+        return task.time_of_day  # fallback: no open slot found

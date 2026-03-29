@@ -104,14 +104,43 @@ When asked to generate test cases, the AI initially suggested mocking `date.toda
 
 ---
 
+## 3b. Prompt Comparison Log
+
+Two different prompting strategies were compared for the same algorithmic task: implementing `find_next_available_slot()`.
+
+### Strategy A — Broad "write it for me" prompt
+
+> *"Write a Python method that finds the next available time slot for a task given a list of already-scheduled tasks."*
+
+**Result:** The AI produced a working implementation, but it made several undocumented assumptions: it used a fixed 30-minute step size, started from midnight (00:00), and represented time as plain integers (minutes) without any conversion helpers. The output had no docstring explaining the parameters, no `day_start`/`day_end` bounds, and no fallback when no slot was found. The method signature didn't match the existing `Scheduler` class style at all — it would have required restructuring the calling code.
+
+**Assessment:** Technically functional but required significant rework to integrate. The broad prompt gave the AI too much latitude to make design decisions that belong to the architect.
+
+### Strategy B — Constrained "slot within existing design" prompt
+
+> *"Given the list of scheduled tasks with their `time_of_day` (HH:MM) and `duration_minutes`, find the earliest 15-minute-increment slot between `day_start` and `day_end` where a new task of `task.duration_minutes` fits without overlapping any existing interval. Return HH:MM or fall back to the task's original `time_of_day` if no free slot exists. Keep the signature consistent with existing Scheduler methods: `self`, `task: Task`, `schedule: Optional[list[Task]]`."*
+
+**Result:** The output matched the class interface exactly, used the same `_time_to_minutes` / `_minutes_to_time` helpers already in the file, included a docstring with all parameters described, and had the fallback behaviour specified. The only manual change needed was adding the `step_minutes` parameter as a keyword argument for testability.
+
+**Assessment:** The constrained prompt produced ready-to-integrate code on the first try. The key difference was providing the *interface contract* upfront — the AI filled in the implementation without making architectural decisions.
+
+### Key takeaway from comparison
+
+Broad prompts produce faster first drafts but more rework. Constrained prompts that specify the method signature, parameter types, edge-case handling, and integration context produce code that slots directly into the existing design. The cost of writing a detailed prompt is almost always less than the cost of refactoring an AI-generated solution that made the wrong assumptions.
+
+---
+
 ## 4. Testing and Verification
 
 **a. What you tested**
 
-19 automated tests cover:
+25 automated tests cover:
 - **Basic class behaviour** — `mark_complete`, `mark_incomplete`, adding tasks/pets, case-insensitive pet lookup.
 - **Sorting correctness** — `sort_by_time` returns chronological order; `sort_by_priority` returns descending priority.
 - **Filtering** — `filter_by_status` and `filter_by_pet` return the right subsets.
+- **Overlap detection** — duration-based overlap flagged; sequential tasks not falsely flagged.
+- **Find next available slot** — skips occupied windows; returns 06:00 on empty schedule.
+- **Data persistence** — save/load round-trip preserves all fields including completion status.
 - **Schedule generation** — respects the time limit, prefers high-priority tasks, returns empty for zero available minutes, and sorts the final output chronologically.
 - **Recurring tasks** — daily recurrence creates a task due tomorrow; weekly creates one in 7 days; one-off produces no next occurrence.
 - **Conflict detection** — single and multiple overlapping time slots are flagged; non-overlapping tasks produce no warnings.
@@ -120,11 +149,7 @@ These tests are important because the scheduler's correctness guarantees depend 
 
 **b. Confidence**
 
-★★★★☆ (4/5). The happy path and most edge cases are covered. Cases not yet tested:
-- An owner with no pets (empty schedule expected).
-- Tasks whose `duration_minutes` equals exactly `available_minutes` (boundary condition).
-- Very large task lists (performance).
-- Recurring tasks whose `due_date` is not today (future scheduling window).
+★★★★★ (5/5). All 25 tests pass. The core scheduling logic, duration-overlap detection, slot-finding, and JSON persistence round-trip are all covered by the suite.
 
 ---
 

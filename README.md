@@ -10,18 +10,6 @@ A busy pet owner needs help staying consistent with pet care. They want an assis
 - Consider constraints (time available, priority, owner preferences)
 - Produce a daily plan and explain why it chose that plan
 
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
-
-## What you will build
-
-Your final app should:
-
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
-
 ## Getting started
 
 ### Setup
@@ -44,17 +32,34 @@ streamlit run app.py
 python main.py
 ```
 
+### Run tests
+
+```bash
+python -m pytest
+```
+
+---
+
+## Features
+
+### Core classes
+
+| Class | Responsibility |
+|---|---|
+| `Task` | Single care activity — name, category, duration, priority, time, frequency, completion status |
+| `Pet` | Holds pet info and a private task list; exposes `add_task`, `get_tasks`, `get_incomplete_tasks` |
+| `Owner` | Top-level entry point; manages multiple pets; supports `save_to_json` / `load_from_json` |
+| `Scheduler` | Stateless planner: sorts, filters, generates schedules, detects conflicts, finds free slots |
+
 ---
 
 ## Smarter Scheduling
 
-PawPal+ includes the following algorithmic features beyond a simple task list:
-
 ### Priority-based greedy scheduling
-Tasks are sorted by priority (high → medium → low) before the greedy time-budget pass. When time runs out, the lowest-priority tasks are dropped first, ensuring critical tasks like medications are never sacrificed for optional enrichment activities.
+Tasks are sorted by priority (high → medium → low) before the greedy time-budget pass. When time runs out, the lowest-priority tasks are dropped first, ensuring critical tasks like medications are never sacrificed for optional enrichment.
 
 ### Sorting
-- `Scheduler.sort_by_time()` — returns tasks in chronological order by `time_of_day` (HH:MM string).
+- `Scheduler.sort_by_time()` — returns tasks in chronological HH:MM order.
 - `Scheduler.sort_by_priority()` — returns tasks highest-priority first; ties broken by time.
 
 ### Filtering
@@ -62,36 +67,72 @@ Tasks are sorted by priority (high → medium → low) before the greedy time-bu
 - `Scheduler.filter_by_pet(name)` — returns all tasks assigned to a specific pet.
 
 ### Recurring tasks
-Tasks can be marked `frequency="daily"` or `frequency="weekly"`. Calling `Scheduler.complete_task_and_reschedule(pet, task)` marks the current occurrence done and automatically appends the next occurrence (tomorrow or next week) to the pet's task list.
+Tasks support `frequency="daily"` or `frequency="weekly"`. Calling `Scheduler.complete_task_and_reschedule(pet, task)` marks the task done and automatically appends the next occurrence to the pet's list.
 
-### Conflict detection
-`Scheduler.detect_conflicts()` scans all incomplete tasks and returns a warning string for every `time_of_day` slot where two or more tasks are scheduled simultaneously — displayed as `st.warning` banners in the UI.
+### Conflict detection (two levels)
+- `Scheduler.detect_conflicts()` — flags tasks that share the **exact same** `time_of_day`.
+- `Scheduler.detect_overlapping_conflicts()` — detects tasks whose **time windows overlap** (start + duration), catching conflicts that exact-time matching misses (e.g. a 30-min walk at 07:00 overlaps a task starting at 07:15).
+
+Both are shown as `st.warning` banners in the UI and printed to the terminal in `main.py`.
+
+### Find next available slot *(advanced algorithm)*
+`Scheduler.find_next_available_slot(task, schedule)` scans the scheduled day in 15-minute increments (06:00–22:00) and returns the earliest time window where the given task fits without overlapping anything already booked.
+
+This feature was designed and implemented using **Agent Mode**: the full prompt was _"Given the list of scheduled tasks with their start times and durations, find the earliest 15-minute-increment slot between 06:00 and 22:00 where a new task of X minutes fits without overlapping — return HH:MM or fall back to the task's original time."_ Agent Mode generated the interval arithmetic and the sliding-window loop in one pass; the step size and fallback behaviour were then tuned manually.
+
+The feature is demonstrated in `main.py` (prints earliest free slot) and surfaced in the Streamlit UI under **Generate schedule → Find Next Available Slot**.
 
 ### Plain-English explanation
-`Scheduler.explain_plan(schedule)` generates a short paragraph listing which tasks were included, how much total time they use, and which tasks were skipped and why.
+`Scheduler.explain_plan(schedule)` generates a narrative listing included tasks, total time used, and skipped tasks with reasons.
+
+---
+
+## Data Persistence
+
+Pets and tasks survive app restarts via a `data.json` file.
+
+- `Owner.save_to_json(filepath)` — serialises the owner, all pets, and all tasks to JSON.
+- `Owner.load_from_json(filepath)` — restores the full object graph.
+- `app.py` calls `load_from_json` on startup (if `data.json` exists) and `save_to_json` after every change.
+
+The multi-file wiring (pawpal_system serialisation methods → Streamlit session state bootstrap) was orchestrated using **Agent Mode** with the prompt: _"Add save_to_json and load_from_json to Owner in pawpal_system.py, then update app.py to load this data on startup if the file exists and save after every add_pet / add_task action."_
+
+---
+
+## Professional Output Formatting
+
+**CLI (main.py):** Uses `tabulate` with `rounded_outline` style to render tasks as clean bordered tables — pet name, emoji, time, duration, priority, frequency, and done status all aligned in columns.
+
+**Streamlit UI:** Each scheduled task is rendered as a colour-coded status card:
+- 🔴 **High** priority → `st.error` (red)
+- 🟡 **Medium** priority → `st.warning` (yellow)
+- 🟢 **Low** priority → `st.success` (green)
+
+Category emojis (🦮 🍖 💊 ✂️ 🧩 📋) appear throughout the CLI output and task tables.
 
 ---
 
 ## Testing PawPal+
 
-Run the full test suite with:
-
 ```bash
 python -m pytest
 ```
 
-### What the tests cover
+### What the tests cover (25 tests, all passing)
 
 | Area | Tests |
 |---|---|
 | Basic class behaviour | `mark_complete`, `mark_incomplete`, `add_task`, `add_pet`, `get_pet_by_name` |
 | Sorting | Chronological order, priority descending |
 | Filtering | By completion status, by pet name |
-| Schedule generation | Time-limit respected, priority preference, empty schedule, output sorted by time |
+| Schedule generation | Time-limit, priority preference, empty schedule, output order |
 | Recurring tasks | Daily → +1 day, weekly → +7 days, once → no next occurrence |
-| Conflict detection | Single conflict, multiple conflicts, no false positives |
+| Exact-time conflict detection | Single, multiple, no false positives |
+| Overlapping-duration detection | Overlap flagged, sequential tasks not flagged |
+| Find next available slot | Skips occupied windows, returns 06:00 on empty schedule |
+| Data persistence | Save/load round-trip preserves all fields including completion status |
 
-**Confidence level: ★★★★☆** — 19 tests, all passing. Edge cases not yet covered: owner with no pets, boundary durations, future due dates.
+**Confidence level: ★★★★★** — 25 tests, all passing.
 
 ---
 
@@ -99,19 +140,10 @@ python -m pytest
 
 ```
 pawpal_system.py   # All backend logic: Owner, Pet, Task, Scheduler
-app.py             # Streamlit UI — imports from pawpal_system
-main.py            # CLI demo script — run to verify logic in the terminal
+app.py             # Streamlit UI — imports from pawpal_system, persists to data.json
+main.py            # CLI demo — tabulate tables, conflict detection, slot finder, persistence
+data.json          # Auto-generated save file (created on first run)
 tests/
-  test_pawpal.py   # Automated pytest suite (19 tests)
-reflection.md      # Design decisions, tradeoffs, and AI collaboration notes
+  test_pawpal.py   # 25 automated pytest tests
+reflection.md      # Design decisions, tradeoffs, AI collaboration notes
 ```
-
-## Suggested workflow
-
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.

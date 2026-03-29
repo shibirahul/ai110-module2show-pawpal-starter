@@ -263,3 +263,99 @@ def test_multiple_conflicts_reported():
     pet.add_task(make_task("D", time="09:00"))
     warnings = Scheduler(owner).detect_conflicts()
     assert len(warnings) == 2
+
+
+# ── Bonus: overlapping duration detection ─────────────────────────────────────
+
+def test_overlap_detected_when_durations_cross():
+    """A 30-min task at 07:00 and a task at 07:15 should be flagged as overlapping."""
+    owner = make_owner()
+    pet = make_pet()
+    owner.add_pet(pet)
+    pet.add_task(Task("Long walk", "walk", 30, 3, time_of_day="07:00"))
+    pet.add_task(Task("Feed",      "feeding", 10, 3, time_of_day="07:15"))
+    warnings = Scheduler(owner).detect_overlapping_conflicts()
+    assert len(warnings) == 1
+    assert "Long walk" in warnings[0]
+
+
+def test_no_overlap_when_tasks_are_sequential():
+    """A task ending at 07:30 and one starting at 07:30 should NOT overlap."""
+    owner = make_owner()
+    pet = make_pet()
+    owner.add_pet(pet)
+    pet.add_task(Task("Walk", "walk", 30, 3, time_of_day="07:00"))   # ends 07:30
+    pet.add_task(Task("Feed", "feeding", 10, 3, time_of_day="07:30"))  # starts 07:30
+    warnings = Scheduler(owner).detect_overlapping_conflicts()
+    assert warnings == []
+
+
+# ── Bonus: find next available slot ──────────────────────────────────────────
+
+def test_find_next_available_slot_skips_occupied_times():
+    """find_next_available_slot should return a slot not occupied by existing tasks."""
+    owner = make_owner(minutes=120)
+    pet = make_pet()
+    owner.add_pet(pet)
+    # Fill 06:00–08:00 with back-to-back tasks
+    pet.add_task(Task("A", "walk",    60, 3, time_of_day="06:00"))
+    pet.add_task(Task("B", "feeding", 60, 3, time_of_day="07:00"))
+    scheduler = Scheduler(owner)
+    schedule = scheduler.generate_schedule()
+    probe = Task("Vet", "other", 30, 2)
+    slot = scheduler.find_next_available_slot(probe, schedule)
+    # Slot should be at or after 08:00
+    assert slot >= "08:00"
+
+
+def test_find_next_available_slot_returns_early_slot_when_free():
+    """With an empty schedule, the slot should be the day start (06:00)."""
+    owner = make_owner(minutes=0)
+    pet = make_pet()
+    owner.add_pet(pet)
+    scheduler = Scheduler(owner)
+    probe = Task("Quick task", "other", 10, 1)
+    slot = scheduler.find_next_available_slot(probe, schedule=[])
+    assert slot == "06:00"
+
+
+# ── Bonus: data persistence ───────────────────────────────────────────────────
+
+def test_save_and_load_json(tmp_path):
+    """Saving and loading an Owner should preserve all pets and tasks."""
+    owner = make_owner()
+    pet = make_pet("Mochi")
+    task = Task("Walk", "walk", 30, 3, time_of_day="07:00", frequency="daily",
+                due_date=date.today())
+    pet.add_task(task)
+    owner.add_pet(pet)
+
+    filepath = str(tmp_path / "test_data.json")
+    owner.save_to_json(filepath)
+
+    restored = Owner.load_from_json(filepath)
+    assert restored.name == owner.name
+    assert restored.available_minutes == owner.available_minutes
+    assert len(restored.get_pets()) == 1
+    assert restored.get_pets()[0].name == "Mochi"
+    tasks = restored.get_pets()[0].get_tasks()
+    assert len(tasks) == 1
+    assert tasks[0].name == "Walk"
+    assert tasks[0].due_date == date.today()
+    assert tasks[0].frequency == "daily"
+
+
+def test_load_preserves_completion_status(tmp_path):
+    """A completed task should still be marked completed after a save/load cycle."""
+    owner = make_owner()
+    pet = make_pet()
+    task = make_task("Done task")
+    task.mark_complete()
+    pet.add_task(task)
+    owner.add_pet(pet)
+
+    filepath = str(tmp_path / "test_done.json")
+    owner.save_to_json(filepath)
+
+    restored = Owner.load_from_json(filepath)
+    assert restored.get_pets()[0].get_tasks()[0].completed is True
